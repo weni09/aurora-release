@@ -13,9 +13,8 @@
 #   curl -fsSL .../install.sh | sh -s -- --version v0.2.0 --dir /opt/aurora
 #
 # 环境变量：
-#   AURORA_REPO      GitHub 仓库，形如 owner/AuroraMihomo。
-#                    仓库上传后请把下面 REPO 的默认值改成真实地址，
-#                    或运行时用 --repo / AURORA_REPO 指定。
+#   AURORA_REPO      GitHub 发布仓库，形如 owner/repo。
+#                    默认 weni09/aurora-release；自建发布仓用 --repo / AURORA_REPO。
 #   AURORA_VERSION   指定版本，默认取最新 release
 #   AURORA_DIR       安装目录，默认 /opt/auroramihomo
 #   AURORA_NO_SERVICE  设为 1 则不安装服务单元（旧名 AURORA_NO_SYSTEMD 仍生效）
@@ -66,7 +65,7 @@ done
 case "$REPO" in
 OWNER/*)
 	printf '\033[31m错误:\033[0m 尚未配置仓库地址。\n' >&2
-	printf '  请用 --repo owner/AuroraMihomo 指定，或设置 AURORA_REPO 环境变量。\n' >&2
+	printf '  请用 --repo owner/repo 指定，或设置 AURORA_REPO 环境变量。\n' >&2
 	exit 1
 	;;
 esac
