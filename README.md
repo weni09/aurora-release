@@ -1,5 +1,8 @@
 # AuroraMihomo
 
+> 本仓库是 AuroraMihomo 的**公开发布库**：只存放安装脚本、Docker Compose 与 GitHub Release 二进制，不含源码。
+> 安装、升级、面板内自升级都从本仓库拉取。
+
 Mihomo 内核运行时与配置管理平台：订阅聚合、配置合并、冲突处理、内嵌面板，一体化管理。
 
 ## 功能
@@ -16,17 +19,16 @@ Mihomo 内核运行时与配置管理平台：订阅聚合、配置合并、冲�
 
 单个静态二进制，不依赖 CGO 与外部 C 库，Alpine 与 Debian/Ubuntu 通用。
 
-完整使用说明见 [使用文档](userdocs/user-guide.md)，部署运行后也可在面板侧边栏的「使用文档」里直接查看。
+完整使用说明部署运行后可在面板侧边栏的「使用文档」里查看。
 
 ## 快速开始
 
-三种部署方式，按场景选：
+两种部署方式，按场景选：
 
 | 方式 | 适合 | 前置要求 |
 |---|---|---|
 | [Docker](#方式一docker) | 大多数场景，升级最省事 | Docker CLI（compose 方式另需 Docker Compose） |
 | [二进制](#方式二二进制) | 不想引入 Docker；透明代理最省事 | 无（静态二进制） |
-| [源码构建](#方式三源码构建) | 二次开发 | Go 1.25+、Node 22+ |
 
 ---
 
@@ -224,7 +226,7 @@ curl -fsSL -o data/country.mmdb \
 
 #### 透明代理的额外改动
 
-默认配置不支持透明代理。需要时编辑 `docker-compose.yml`，取消 `user: "0:0"`、`AURORA_RUN_AS_ROOT` 与 `devices` 的注释，并注释掉 `no-new-privileges`。这会降低容器隔离性，详见[透明代理文档](docs/AuroraMihomo-Transparent-Proxy.md)。
+默认配置不支持透明代理。需要时编辑 `docker-compose.yml`，取消 `user: "0:0"`、`AURORA_RUN_AS_ROOT` 与 `devices` 的注释，并注释掉 `no-new-privileges`。这会降低容器隔离性，详见面板「使用文档」中的透明代理章节。
 
 另外在**宿主机**写入转发与 `rp_filter`（容器内不会改 sysctl；host 网络下 Docker 也会拒绝相关 `--sysctl`）：
 
@@ -415,259 +417,3 @@ sudo apk add --no-cache curl bind-tools
 ```bash
 sudo cat /opt/auroramihomo/data/initial_password.txt
 ```
-
----
-
-### 方式三：源码构建
-
-前置：Go 1.25+、Node 22.18+
-
-```bash
-make deps    # 安装前后端依赖
-make build   # 构建前端（同步到 go:embed 内嵌源）并编译后端
-make run     # 启动
-```
-
-不使用 make 时：
-
-```bash
-go mod download
-cd frontend && npm ci && npm run build && cd ..
-rm -rf backend/api/public && cp -r frontend/dist backend/api/public  # go:embed 内嵌源
-touch backend/api/public/.gitkeep
-go build -o auroramihomo ./backend/api
-./auroramihomo -f backend/api/etc/aurora-api.yaml
-```
-
-交叉编译（`CGO_ENABLED=0`，无需任何 C 工具链）：
-
-```bash
-CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -trimpath -ldflags="-w -s" -o auroramihomo ./backend/api
-CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-w -s" -o auroramihomo ./backend/api
-```
-
-访问地址：
-
-| 地址 | 说明 |
-|---|---|
-| `http://127.0.0.1:8899` | 管理面板 |
-| `http://127.0.0.1:8899/ui/` | Zashboard 内嵌面板 |
-| `http://127.0.0.1:8899/healthz` | 健康检查 |
-
-### 开发模式
-
-后端与前端分别启动，Vite 会把 API 代理到后端：
-
-```bash
-make dev                        # 后端，监听 8899
-cd frontend && npm run dev      # 前端，监听 5173
-```
-
-## 配置
-
-配置文件为 `backend/api/etc/aurora-api.yaml`，容器内使用 `docker/aurora-api.docker.yaml`。
-
-关键项可用环境变量覆盖（优先级高于配置文件）：
-
-| 环境变量 | 说明 |
-|---|---|
-| `AURORA_JWT_SECRET` | JWT 签名密钥。生产环境建议显式设置，否则首次启动会随机生成并存入数据库 |
-| `AURORA_JWT_EXPIRE` | 令牌有效期（秒），默认 86400 |
-| `AURORA_DATA_SOURCE` | SQLite 数据库路径 |
-| `AURORA_CONFIG_DIR` | 数据目录（config.yaml、备份、内核、面板均在此） |
-| `AURORA_MIHOMO_BINARY` | mihomo 二进制路径，留空则用数据目录下的默认位置 |
-| `AURORA_HOST` / `AURORA_PORT` | 监听地址与端口 |
-| `AURORA_AUTO_UPDATE` | 是否启用自动更新（true/false） |
-| `AURORA_AUTO_UPDATE_CRON` | 自动更新 cron 表达式（6 段，含秒） |
-| `AURORA_GITHUB_API` | GitHub API 地址，可指向自建镜像 |
-| `AURORA_CDN_PROVIDERS` | CDN 源列表，逗号分隔 |
-
-## 数据目录
-
-```
-data/
-├── aurora.db              # SQLite 数据库（订阅、组合、设置、版本记录）
-├── config.yaml            # 合并生成的 mihomo 配置，内核实际加载的就是它
-├── backups/               # 配置备份，保留最近 10 份
-├── bin/mihomo             # 内核二进制（自动下载）
-├── zashboard/             # 面板静态资源（自动下载）
-├── substore/              # Sub-Store 脚本运行目录
-├── netbackup/             # 透明代理启用前的防火墙/路由快照
-├── logs/aurora.log        # 应用日志（8MB × 5 份滚动）
-└── initial_password.txt   # 首次启动生成的初始密码；登录或改密后自动删除
-```
-
-目录位置由配置项 `Mihomo.ConfigDir` 决定（容器内是 `/data`）。备份整个目录即可完整迁移。
-
-## 运维
-
-### 备份与恢复
-
-```bash
-# 备份（停服后拷贝最稳妥，避免 SQLite 写入中途被复制）
-sudo systemctl stop auroramihomo
-sudo tar -czf aurora-backup-$(date +%F).tar.gz -C /opt/auroramihomo data
-sudo systemctl start auroramihomo
-
-# 恢复
-sudo systemctl stop auroramihomo
-sudo tar -xzf aurora-backup-2026-07-30.tar.gz -C /opt/auroramihomo
-sudo systemctl start auroramihomo
-```
-
-配置文件本身还有另一层保护：每次合并前自动备份到 `data/backups/`，界面「配置中心 → 版本」可直接回滚。
-
-### 升级
-
-| 部署方式 | 升级命令 |
-|---|---|
-| Docker | `docker compose pull && docker compose up -d`（可选先重新下载 compose 文件） |
-| 二进制（在线） | 重跑安装脚本，会保留配置并自动停服替换 |
-| 二进制（离线） | 停服 → 覆盖二进制 → 启动。**不要覆盖 `etc/` 与 `data/`** |
-| 源码 | `git pull && make build && make run` |
-
-mihomo 内核与 Zashboard 面板的升级独立于本体，在「系统设置」页手动触发或开启自动更新。
-
-### 卸载
-
-```bash
-# Docker
-docker compose down
-# 数据仍在 ./data，确认不再需要后再删
-
-# 二进制
-sudo systemctl disable --now auroramihomo
-sudo rm /etc/systemd/system/auroramihomo.service
-sudo systemctl daemon-reload
-sudo rm -rf /opt/auroramihomo      # 会一并删除 data/，先备份
-```
-
-若曾启用过 TProxy 透明代理，卸载前请先在界面关闭开关，让程序把防火墙规则与策略路由拆干净。直接删程序会把规则留在宿主上。
-
-### 排障
-
-**服务起不来**
-
-```bash
-sudo journalctl -u auroramihomo -n 100 --no-pager    # systemd
-docker compose logs --tail=100   # Docker
-tail -100 /opt/auroramihomo/data/logs/aurora.log     # 应用日志
-```
-
-**Docker 反复报 `unable to open database file (14)`**：SQLite 打不开 `/data/aurora.db`，通常是挂载的数据目录不可写。新镜像（入口脚本）启动时会自动把属主修正为运行账户（默认 uid/gid 10001，可用 `AURORA_PUID`/`AURORA_PGID` 调整），若仍报错请确认：已 `docker compose pull` 拉到新镜像；数据目录（含 `AURORA_DATA_DIR` 覆盖的场景）存在且宿主机可写。老版本镜像救急：`sudo chmod -R a+rwX <数据目录>`，或按运行账户 chown（默认 `sudo chown -R 10001:10001 <数据目录>`，改了 `AURORA_PUID` 就用对应 uid）。
-
-**内核下载失败**：日志里出现 `download failed via ...`。通常是网络问题，可在「系统设置 → 下载与更新出网」调整 CDN 源顺序，或手工放置内核（Docker 见上文「内核 / Zashboard 初始化失败与手动放置」；二进制见离线安装）。
-
-**立即拉取 / 合并报 `can't download GeoSite.dat` 或 `context deadline exceeded`**：配置里引用了 `geosite:` / `geoip:`（订阅自带规则或基础配置里的 geosite 分流），mihomo 校验时缺规则库且默认下载源 GitHub 直连超时。给基础配置加 `geox-url`（见上文 GeoSite 一节）或把 `GeoSite.dat` / `country.mmdb` 放到 `data/`（容器 `/data`）后重试；开箱默认 base 不引用 geosite，无此问题。
-
-**端口被占用**：默认用 8899（面板）与 9090（内核控制 API）。改端口用环境变量 `AURORA_PORT`，内核控制端口在「配置中心」的 `external-controller` 里改。
-
-**忘记管理员密码**：没有内置重置命令。密码哈希存在 `settings` 表的 `admin_password` 键，删掉该行后重启，程序会重新生成初始密码并写入 `data/initial_password.txt`：
-
-```bash
-sudo systemctl stop auroramihomo
-sqlite3 /opt/auroramihomo/data/aurora.db "delete from settings where key='admin_password';"
-sudo systemctl start auroramihomo
-sudo cat /opt/auroramihomo/data/initial_password.txt
-```
-
-宿主没装 `sqlite3` 时可用任意 SQLite 客户端，或直接从备份恢复。
-
-**配置合并后内核起不来**：程序会自动校验并回滚到上一份可用配置，日志里能看到回滚记录。也可在「配置中心 → 版本」手工回滚。
-
-## 常用命令
-
-```bash
-make check             # 格式检查 + 静态检查 + 测试 + 前端类型检查
-make test-race         # 带竞态检测运行测试
-make cover             # 查看测试覆盖率
-make sync-docs         # 同步 userdocs/ 到前端内置副本
-make docker            # 构建镜像
-make docker-multiarch  # 构建 amd64/arm64 多架构镜像
-```
-
-## 发布版本
-
-GitHub Actions **只在手动打 tag 并 push 后触发**，日常推送分支不跑流水线。
-
-```bash
-# 先在本地确认全绿，避免推了 tag 才发现问题
-make check
-
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-推送后自动执行：质量门禁（完整 CI）→ 构建五平台二进制 → 创建 Release 并附上校验和。
-
-门禁不过就不会构建产物，也不会创建 Release，因此不存在「发出了测试不通过的包」这种情况。
-
-想在正式打 tag 前先验一遍，可以在 Actions 页面手动运行 Release（填一个临时版本号）。手动运行只构建产物供下载，**不创建 Release**。也可以单独手动运行 CI 只跑检查。
-
-发错了 tag 需要重来：
-
-```bash
-git tag -d v0.2.0                  # 删本地
-git push origin :refs/tags/v0.2.0  # 删远端
-```
-
-已创建的 Release 需要在 GitHub 页面手工删除，删 tag 不会连带删除它。
-
-## 分享链接
-
-订阅、组合、文件模板都会自动生成免登录的分享链接：
-
-```
-http://<地址>/api/v1/share/<token>               # 订阅与组合，默认 Mihomo YAML
-http://<地址>/api/v1/share/<token>?target=surge  # 指定客户端格式
-http://<地址>/api/v1/share/<token>?filter=香港    # 临时按关键词筛选节点
-http://<地址>/api/v1/file/<token>                # 文件模板直链（不支持 target/filter）
-```
-
-`target` 支持：`clash` `mihomo` `base64` `plain` `links` `surge` `surgemac` `loon` `qx` `singbox` `v2ray` `json` `stash` `surfboard` `shadowrocket` `egern`。
-
-链接凭据即链接本身，可在「Sub-Store 管理 → 分享管理」集中改名、设有效期、重置凭据或撤销。详见[使用文档](userdocs/user-guide.md#分享管理)。
-
-## 透明代理
-
-让局域网设备无需各自设置代理即可分流。支持 Linux（TUN / TProxy）与 macOS（仅 TUN），Windows 不支持。
-
-在「系统设置 → 透明代理」启用。面板会先检测运行环境，缺依赖时给出可复制的安装命令；条件不具备时开关不可用。
-
-启用后**必须在 90 秒内确认网络正常**，否则自动拆除规则并关闭开关——规则配错可能让你同时失去 SSH 与面板访问，这个确认窗口是唯一的补救通道。回滚意图会持久化，面板崩溃重启后仍会生效。
-
-两种模式都会**一并接管本机自身的流量**（宿主上的 `curl`、`apt` 也按分流规则走节点），没有只代理局域网设备的开关。SSH、面板端口、内核 API 与面板自身的出站始终直连。本机 DNS 指向回环（systemd-resolved 的 `127.0.0.53`）时本机的域名分流不生效，检测会告警。
-
-两种模式的取舍、防护机制、本机流量的接管细节、以及终端设备的四种接入方式（手动代理 / 只改 DNS / 网关模式 / 旁路由），见[透明代理文档](docs/AuroraMihomo-Transparent-Proxy.md)。
-
-真机实测记录（含完整命令与输出）：
-
-- [Ubuntu 24.04 / Docker](docs/AuroraMihomo-Transparent-Proxy-Test-Ubuntu-Docker.md)
-- [Alpine 3.24 / 二进制](docs/AuroraMihomo-Transparent-Proxy-Test-Alpine-Binary.md)（含 OpenRC 与 musl 兼容性）
-- [Ubuntu 二进制与容器](docs/AuroraMihomo-Transparent-Proxy-Test-Report.md)
-
-> 首次启用 TProxy 建议在有物理或控制台访问的机器上验证。
-
-## 安全说明
-
-- 管理员口令以 PBKDF2-HMAC-SHA256（21 万轮）加盐哈希存储
-- 登录失败 5 次（5 分钟窗口内）锁定 15 分钟
-- 除分享链接、文件直链、登录接口外，所有 API 均需 JWT；WebSocket 连接同样校验令牌
-- 分享链接与文件直链设计上即为公开访问，请勿在其中放置敏感内容
-- 建议不要将服务直接暴露在公网；如需暴露请置于反向代理之后并启用 HTTPS
-
-## 默认 CDN 源
-
-`ghproxy.com` → `mirror.ghproxy.com` → `gh.ddlc.top` → `ghproxy.net` → `gitdl.cn` → `gh.llkk.cc` → `ghp.ci` → `github`（官方兜底）
-
-按顺序尝试，失败自动回退到下一个。可在「系统设置」页调整。
-
-## 鸣谢
-
-本项目的运行与面板能力建立在下列开源项目之上，谨致谢意：
-
-- **[Mihomo](https://github.com/MetaCubeX/mihomo)**（Clash.Meta）— 代理内核，负责规则分流、TUN/TProxy 与出站协议实现
-- **[Zashboard](https://github.com/Zephyruso/zashboard)** — 内嵌控制面板，提供代理组、连接与流量等可视化管理界面
-- **[Sub-Store](https://github.com/sub-store-org/Sub-Store)** — 订阅管理脚本生态。其核心组件（单条/组合订阅、模板转换、分享）在本仓库以 Go 重写（`backend/internal/substore` 与 `service` 层）；脚本类操作符以 goja 内嵌执行原版脚本，订阅工作流与其操作符语义保持一致
-
-上述项目的许可证、商标与品牌归属其各自作者与社区；本仓库仅为集成与配置管理用途。
