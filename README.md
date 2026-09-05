@@ -348,6 +348,9 @@ WorkingDirectory=/opt/auroramihomo
 ExecStart=/opt/auroramihomo/auroramihomo -f /opt/auroramihomo/etc/aurora-api.yaml
 Restart=always
 RestartSec=3
+# 主程序自升级会短暂退出再拉起；默认 KillMode=control-group 会把
+# cgroup 里仍在跑的 mihomo 一并杀掉，旁路由/TProxy 会全面断网。
+KillMode=process
 
 # 透明代理需要的权限。不用透明代理可删掉这两行并加 User=nobody
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
