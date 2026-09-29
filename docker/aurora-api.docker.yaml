@@ -6,6 +6,14 @@ Port: 8899
 # 合并配置、刷新订阅、下载内核等操作远超默认 3 秒，需放宽
 Timeout: 300000
 
+# 单请求体上限（go-zero 默认 1 MiB）。配置中心支持从本地文件导入 mihomo
+# 配置，而 1 万条规则的内核配置就有约 1 MB——默认值会在保存时直接回 413，
+# 且响应体为空，用户在界面上只看到一句「请求失败」。
+# 16 MiB 足以容纳常见配置，同时给 dumpYaml 展开 YAML 锚点后的体积留出余量；
+# 前端 frontend/src/utils/localConfigImport.ts 的 SERVER_MAX_BODY_BYTES
+# 与这里保持一致，超限时会在导入弹窗里提前拦下并说明原因。
+MaxBytes: 16777216
+
 # 连接层超时。上面的 Timeout 只约束单请求处理阶段，不限制读写报文，
 # 缺少这些值时慢速连接（Slowloris）可长期占用连接不被回收。
 Server:
