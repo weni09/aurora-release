@@ -1,0 +1,227 @@
+name: CI
+
+# 本仓库（aurora-release）是公开发布仓，不含源码；源码在私有仓库
+# weni09/AuroraMihomo。私有仓库的 Actions 走计费额度（Free 账户 2000
+# 分钟/月，Linux 按 1x 计），而公开仓库的 Actions 完全免费，于是把
+# 构建/测试/静态检查这些重活全部搬到这里跑：
+#
+#   私有仓库 .github/workflows/public-dispatch.yml
+#     └─ repository_dispatch(event_type=ci, payload={sha, ref})
+#          └─ 本文件：checkout 私有源码 → 跑全部门禁
+#
+# 私有仓库那侧只剩一个十几秒的 curl job，额度消耗降到原来的 1/20 左右；
+# 额度彻底耗尽时它会跑不起来，可用私有仓库的 `make dispatch-ci` 在本地
+# 直接触发本 workflow（见 scripts/dispatch-public.sh）。
+#
+# 注意：本仓库是公开的，Actions 日志对所有人可见。golangci-lint 与
+# go test 失败时会带出源码片段，这是迁移到公开仓库的已知代价
+# （团队已确认接受）；排查时不要往这里 echo 源码或 secrets。
+on:
+  repository_dispatch:
+    types: [ci]
+  # 手动重跑：ref 传 commit SHA / 分支 / tag
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "私有仓库 ref（commit SHA / 分支 / tag）"
+        required: true
+        default: "main"
+
+# 只读：CI 不写本仓库，唯一的外部凭据是 checkout 私有源码用的 SRC_PAT
+permissions:
+  contents: read
+
+env:
+  SRC_REPO: weni09/AuroraMihomo
+  SRC_REF: ${{ github.event.client_payload.sha || inputs.ref }}
+
+# 同一 commit 连续触发时取消旧 run：PR 连推多次只跑最后一次，省 runner 排队
+concurrency:
+  group: ci-${{ github.event.client_payload.sha || inputs.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端构建与测试
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验 SRC_PAT 已配置
+        env:
+          TOKEN: ${{ secrets.SRC_PAT }}
+        run: |
+          # 跨仓库 checkout 必须用 PAT：默认的 GITHUB_TOKEN 只对当前仓库有效
+          if [ -z "$TOKEN" ]; then
+            echo "::error::未配置 secrets.SRC_PAT（需对 weni09/AuroraMihomo 有 contents:read 的 PAT）"
+            exit 1
+          fi
+
+      - name: 检出私有源码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.SRC_REF }}
+          token: ${{ secrets.SRC_PAT }}
+          # 所有内容落到 src/，避免与（本仓库的）工作区文件混淆
+          path: src
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          # 直接读 go.mod，避免与其中声明的版本不一致导致编译器拒绝构建
+          go-version-file: src/go.mod
+          cache: true
+          cache-dependency-path: src/go.sum
+
+      - name: 检查代码格式
+        working-directory: src
+        run: |
+          files=$(gofmt -l ./backend)
+          if [ -n "$files" ]; then
+            echo "以下文件未格式化："
+            echo "$files"
+            exit 1
+          fi
+
+      # go vet 已由 golangci-lint 的 govet 覆盖，不再单独跑一遍（曾多占 ~50s）。
+      #
+      # 用官方安装脚本 + 直接调 CLI，不走 golangci-lint-action：
+      # 该 action 把「下载、校验版本、执行」包在一起，任何一环出错都只报
+      # 一句失败，日志里看不出是环境问题还是代码问题。本项目曾因此连续三次
+      # 发布失败——真因是 lint 二进制与 Go 工具链的版本错配（见下），
+      # 但 action 只报"静态检查失败"，极易误判成自家代码有 lint 问题。
+      # 直接调 CLI 则版本、参数与 panic 栈全部落在日志里。
+      #
+      # 版本必须固定且不能低于构建它的 Go 版本所能解析的语言版本：
+      # golangci-lint 二进制内嵌 go/types，只能分析「不高于自身构建 Go 版本」
+      # 的代码。v2.6.2 用 go1.25 构建，遇到 Go 1.26 的标准库会直接
+      # panic: file requires newer Go version go1.26。而 setup-go 读 go.mod 时
+      # 把 `go 1.25.0` 当下限、实际装最新的 1.26.x，于是必然踩中。
+      # v2.11.4 用 go1.26.1 构建，已验证在 1.25 与 1.26 工具链下均为 0 issues。
+      # 同理不用 latest：lint 规则集随版本变化，浮动版本会让同一份代码
+      # 在不同时间得到不同结论。
+      - name: 缓存 golangci-lint
+        id: cache-golangci
+        uses: actions/cache@v4
+        with:
+          path: ~/golangci-lint-bin
+          key: golangci-lint-v2.11.4-${{ runner.os }}
+
+      - name: 安装 golangci-lint
+        if: steps.cache-golangci.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$HOME/golangci-lint-bin"
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+            | sh -s -- -b "$HOME/golangci-lint-bin" v2.11.4
+
+      - name: 静态检查 (golangci-lint)
+        working-directory: src
+        run: |
+          "$HOME/golangci-lint-bin/golangci-lint" --version
+          "$HOME/golangci-lint-bin/golangci-lint" run --timeout=5m ./backend/...
+
+      - name: 构建
+        working-directory: src
+        run: go build -v ./backend/api
+
+      - name: 测试（含竞态检测）
+        working-directory: src
+        run: go test -race -cover ./backend/...
+
+  conventions:
+    name: 开发规范校验
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验 SRC_PAT 已配置
+        env:
+          TOKEN: ${{ secrets.SRC_PAT }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::未配置 secrets.SRC_PAT（需对 weni09/AuroraMihomo 有 contents:read 的 PAT）"
+            exit 1
+          fi
+
+      - name: 检出私有源码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.SRC_REF }}
+          token: ${{ secrets.SRC_PAT }}
+          path: src
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 校验 AGENTS.md / backend/AGENTS.md / frontend/AGENTS.md 中可机检的条款：
+      # SQL 分层、goctl 生成物完好、logic 层日志用法、前端主题 token、skill 路径。
+      # 存量违规记录在 scripts/conventions-baseline.txt，只拦新增。
+      - name: 校验开发规范
+        working-directory: src
+        run: python scripts/check-conventions.py --baseline scripts/conventions-baseline.txt
+
+  frontend:
+    name: 前端构建与类型检查
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验 SRC_PAT 已配置
+        env:
+          TOKEN: ${{ secrets.SRC_PAT }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::未配置 secrets.SRC_PAT（需对 weni09/AuroraMihomo 有 contents:read 的 PAT）"
+            exit 1
+          fi
+
+      - name: 检出私有源码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.SRC_REF }}
+          token: ${{ secrets.SRC_PAT }}
+          path: src
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: src/frontend/package.json
+          cache: npm
+          cache-dependency-path: src/frontend/package-lock.json
+
+      - name: 安装依赖
+        working-directory: src/frontend
+        run: npm ci
+
+      # 前端内置的使用文档是 userdocs/ 下原件的副本（为何用复制而非跨目录
+      # import 见 scripts/sync-docs.mjs 的注释）。改了原件忘同步，
+      # 面板里显示的就会是旧文档，这里兜住。
+      - name: 校验内置文档与 userdocs/ 一致
+        working-directory: src
+        run: node scripts/sync-docs.mjs --check
+
+      - name: 类型检查
+        working-directory: src/frontend
+        run: npx vue-tsc --noEmit -p tsconfig.app.json
+
+      # 此前 CI 未跑 lint，导致「禁止 any」等规范从未被强制，
+      # 积累了 87 处违规。存量已冻结在 eslint-suppressions.json，
+      # 新增的 any 会在此处失败。修完存量后用
+      # `npx eslint . --prune-suppressions` 收紧该文件。
+      - name: 代码规范检查 (eslint)
+        working-directory: src/frontend
+        run: npx eslint . --no-fix
+
+      # 回归测试，重点覆盖两类曾导致数据丢失的路径（配置被空值覆盖、
+      # 编辑器空文本清空高级参数）与弹窗/提示的无障碍行为。
+      - name: 单元测试
+        working-directory: src/frontend
+        run: npm test
+
+      - name: 构建
+        working-directory: src/frontend
+        run: npm run build
+
+  # 故意不再做「多架构镜像只构建不推送」：
+  # v0.3.x 实测该 job 约 4–5 分钟，且 release 已会 buildx 推送 amd64/arm64，
+  # 门禁阶段再 QEMU 编一遍纯属重复。Dockerfile 变更风险由发版 docker job 兜住；
+  # 若只想验 Dockerfile，可 workflow_dispatch 本 CI 后在本地/单独 job 跑。

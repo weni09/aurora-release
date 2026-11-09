@@ -1,0 +1,253 @@
+name: Release
+
+# 发版流水线：源码仍在私有仓库 weni09/AuroraMihomo，但构建与发布全部
+# 在公开仓库执行——公开仓库的 Actions 不计费额度，而私有仓库每次发版
+# 要吃掉 8 分钟以上（QEMU 多架构镜像 + 五平台交叉编译），是额度消耗
+# 的最大头。
+#
+# 触发链：
+#   git tag v0.19.0 && git push origin v0.19.0          （私有仓库）
+#     └─ 私有仓库 public-dispatch.yml
+#          └─ repository_dispatch(event_type=release, payload={tag, notes})
+#               └─ 本文件：checkout 私有源码 → 构建 → 发布到本仓库
+#
+# 也可以手动触发（workflow_dispatch），用于重跑或补发：
+#   version 必填（如 v0.19.0），notes 留空则取私有仓库该 tag 的说明。
+#
+# 产物位置与迁移前完全一致：本仓库的 Release 资产 + ghcr.io/weni09/auroramihomo。
+# 所以 install.sh / docker-compose.yml / 后端自动更新的下载地址都不需要改。
+on:
+  repository_dispatch:
+    types: [release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（如 v0.19.0）"
+        required: true
+      notes:
+        description: "Release 说明（留空则自动取私有仓库同名 tag 的说明）"
+        required: false
+
+permissions:
+  contents: write # 同步物料需要 push main，创建 Release 也需要写
+  packages: write # 推送 GHCR 镜像
+
+env:
+  SRC_REPO: weni09/AuroraMihomo
+  # 镜像名保持不变：下游 compose / 加速站 / 文档都按这个名字拉
+  GHCR_IMAGE: ghcr.io/weni09/auroramihomo
+  VERSION: ${{ github.event.client_payload.tag || inputs.version }}
+
+jobs:
+  # 与二进制并行的镜像 job：buildx 的 QEMU 模拟很慢，单独 job 能让它
+  # 和 release job 同时跑，总时长从「串行 ~13 分钟」压到「并行 ~8 分钟」。
+  docker:
+    name: 构建并推送 Docker 镜像
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: 校验 SRC_PAT 已配置
+        env:
+          TOKEN: ${{ secrets.SRC_PAT }}
+        run: |
+          # 这一个 secret 承担两件事：跨仓库 checkout 私有源码（contents:read）
+          # 与登录 GHCR 推镜像（write:packages）。缺了它两步都会失败，
+          # 这里提前报出可读的错误，而不是等到 checkout 抛 Input required。
+          if [ -z "$TOKEN" ]; then
+            echo "::error::未配置 secrets.SRC_PAT（需 repo:contents:read 与 write:packages）"
+            exit 1
+          fi
+
+      - name: 检出私有源码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.VERSION }}
+          token: ${{ secrets.SRC_PAT }}
+          path: src
+
+      - name: 配置 QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: 配置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 用 SRC_PAT 而不是 GITHUB_TOKEN 登录：GITHUB_TOKEN 的 packages 权限
+      # 只覆盖「与本仓库关联的包」，而 auroramihomo 包属于私有仓库，
+      # 从 aurora-release 推它会被拒（403）。
+      - name: 登录到 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.SRC_PAT }}
+
+      - name: 提取镜像元数据
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GHCR_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.event_name == 'repository_dispatch' }}
+            type=raw,value=${{ env.VERSION }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: 构建并推送多架构镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: src
+          file: src/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: 构建二进制并发布 Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验 SRC_PAT 已配置
+        env:
+          TOKEN: ${{ secrets.SRC_PAT }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::未配置 secrets.SRC_PAT（需对 weni09/AuroraMihomo 有 contents:read）"
+            exit 1
+          fi
+
+      # 两个 checkout 都显式指定 path：actions/checkout 支持多仓并行检出，
+      # 但默认会把第一个 checkout 的目录当成 GITHUB_WORKSPACE，第二个
+      # 落到子目录时容易互相覆盖。分开命名最稳。
+      - name: 检出发布仓库（本仓库）
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: 检出私有源码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.VERSION }}
+          token: ${{ secrets.SRC_PAT }}
+          path: src
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: src/frontend/package.json
+          cache: npm
+          cache-dependency-path: src/frontend/package-lock.json
+
+      - name: 构建前端并同步到内嵌源
+        run: |
+          cd src/frontend && npm ci && npm run build
+          cd ..
+          rm -rf backend/api/public
+          cp -r frontend/dist backend/api/public
+          touch backend/api/public/.gitkeep
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: src/go.mod
+          cache: true
+          cache-dependency-path: src/go.sum
+
+      - name: 交叉编译五平台产物并打包
+        working-directory: src
+        run: |
+          mkdir -p dist
+          platforms=(
+            "linux amd64"
+            "linux arm64"
+            "darwin amd64"
+            "darwin arm64"
+            "windows amd64 .exe"
+          )
+          for p in "${platforms[@]}"; do
+            read -r goos goarch ext <<< "$p"
+            echo "Building $goos/$goarch..."
+            name="auroramihomo_${VERSION}_${goos}_${goarch}"
+            mkdir -p "dist/$name/etc"
+            CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch go build -trimpath -ldflags="-w -s -X 'auroramihomo/backend/internal/version.AppVersion=${VERSION}'" -o "dist/$name/auroramihomo$ext" ./backend/api
+            cp backend/api/etc/aurora-api.yaml "dist/$name/etc/"
+            cp README.md "dist/$name/" 2>/dev/null || true
+            if [ "$goos" = "windows" ]; then
+              (cd dist && zip -qr "$name.zip" "$name" && sha256sum "$name.zip" > "$name.zip.sha256")
+            else
+              tar -czf "dist/$name.tar.gz" -C dist "$name"
+              (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+            fi
+            rm -rf "dist/$name"
+          done
+          (cd dist && cat *.sha256 > SHA256SUMS.txt)
+          ls -lh dist/
+
+      # 物料同步改成「在本仓库内直接提交」：迁移前要把文件先 checkout 到
+      # 私有仓库动作的临时目录，再用 PAT clone 目标仓库、push 一次，
+      # 失败点很多（PAT、分支保护、并发 push）。现在 checkout 的就是
+      # 本仓库，push 直接用 GITHUB_TOKEN，且它的 push 不会递归触发
+      # Actions（GitHub 对 GITHUB_TOKEN 触发的 push 做了去重）。
+      - name: 同步部署物料到本仓库
+        run: |
+          mkdir -p repo/scripts repo/docker
+          cp src/scripts/install.sh repo/scripts/
+          cp src/scripts/sysctl-auroramihomo*.conf repo/scripts/ 2>/dev/null || true
+          cp src/docker/docker-compose.yml repo/docker/
+          cp src/docker/aurora-api.docker.yaml repo/docker/ 2>/dev/null || true
+          cp src/docs/aurora-release-README.md repo/README.md
+          cp src/dist/SHA256SUMS.txt repo/
+
+          cd repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "物料无变动，无需提交"
+          else
+            git commit -m "chore(release): sync deployment files for ${VERSION}"
+            git push origin HEAD:main
+          fi
+
+      - name: 提取版本变更说明
+        env:
+          # client_payload / inputs 的内容一律先落到环境变量再引用，
+          # 不直接内插进 run 脚本：release notes 是自由文本，内插等于
+          # 让文本变成 shell 代码。
+          PAYLOAD_NOTES: ${{ github.event.client_payload.notes || inputs.notes }}
+        run: |
+          mkdir -p src/dist
+          if [ -n "$PAYLOAD_NOTES" ]; then
+            printf '%s\n' "$PAYLOAD_NOTES" > src/dist/RELEASE_NOTES.md
+          else
+            # 兜底：手动触发且没填 notes 时，读私有仓库同名 tag 的说明。
+            # checkout 指定 ref 为 tag 时 git 已把 tag 对象拉下来。
+            notes=$(cd src && git tag -l --format='%(contents)' "$VERSION" 2>/dev/null || true)
+            if [ -z "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+              notes=$(cd src && git log -1 --format=%B 2>/dev/null || true)
+            fi
+            printf '%s\n' "$notes" > src/dist/RELEASE_NOTES.md
+          fi
+          echo "=== 提取到的版本变更说明 ==="
+          cat src/dist/RELEASE_NOTES.md
+
+      - name: 发布 Release 资产
+        uses: softprops/action-gh-release@v2
+        with:
+          # 同一个仓库，不再需要跨仓库的 repository + PAT
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ env.VERSION }}
+          files: |
+            src/dist/*.tar.gz
+            src/dist/*.zip
+            src/dist/*.sha256
+            src/dist/SHA256SUMS.txt
+          generate_release_notes: false
+          body_path: src/dist/RELEASE_NOTES.md
